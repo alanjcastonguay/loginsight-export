@@ -68,6 +68,17 @@ def arguments():
                               default=os.path.join(os.path.expanduser("~"), ".netrc"),
                               help="Alternate .netrc configuration file with credentials in the format "
                                    "`machine li.example.com login Charlie password SuperSecr3t! account Local`")
+    accountgroup.add_argument("--browser",
+                              default=False,
+                              choices=('any', 'chrome', 'firefox'),
+                              nargs='?',
+                              dest='use_browser_session',
+                              const='any',
+                              help="Read JSESSIONID cookie for URL from a local web browser. Default: %(default)s")
+    accountgroup.add_argument("--session",
+                              dest="session_id",
+                              default=None,
+                              help="Assume this JSESSIONID cookie is already valid.")
 
     certgroup = parser.add_argument_group("Certificates")
     certgroup.add_argument("--save", metavar="foo.pem",
@@ -82,7 +93,7 @@ def arguments():
     loggroup.add_argument("-v", "--verbose", action="count", default=0, dest="loglevel", help="Replace progressbar with logs. -vv writes PII (urls & queries) to stdout")
     loggroup.add_argument("--noprompt", action="store_false", default=True, dest="prompt", help="Don't prompt for anything interactively")
 
-    parser.add_argument("--nice", type=int, default=0, dest="delay", help="Be nice: wait %(metavar)s seconds between chunk downloads.")
+    parser.add_argument("--nice", type=int, default=0, dest="delay", metavar="DELAY", help="Be nice: wait %(metavar)s seconds between chunk downloads. Default %(default)s")
     parser.add_argument("--max", type=int, default=2000, help="Largest quantity of messages to retrieve in a single bin [1-20k], default %(default)s")
     parser.add_argument("--raw", dest="format", action="store_const", default="JSON", const="RAW", help="Export in %(const)s format instead of the %(default)s default")
 
@@ -109,6 +120,15 @@ def arguments():
         else:
             parser.exit(2)
 
+    if args.use_browser_session:
+        import browsercookie
+        cookies = getattr(browsercookie, args.use_browser_session if args.use_browser_session != 'any' else 'load')()
+        for c in cookies:
+            if c.domain == args.hostname and c.name == 'JSESSIONID':
+                args.session_id = c.value
+        if args.session_id is None:
+            parser.error("No JSESSIONID cookie found in browser %s for host %s" % (args.use_browser_session, args.hostname))
+
     if args.username is None and remote.username is not None:
         args.username = remote.username
 
@@ -125,7 +145,7 @@ def arguments():
         if args.username == "":
             args.username = None
 
-    if args.username is None:
+    if args.session_id is None and args.username is None:
         parser.error(
             "Username required, either on command line or in ~/.netrc:\n"
             " * On the command line: --username=foo\n"
@@ -133,7 +153,7 @@ def arguments():
             " * In a .netrc file: machine li.example.com login Charlie password SuperSecr3t! account Local"
         )
 
-    if args.password is None and args.prompt:
+    if args.session_id is None and args.password is None and args.prompt:
         print("No password found for {0}@{1} in .netrc".format(args.username, args.hostname))
         try:
             args.password = getpass()
@@ -143,7 +163,7 @@ def arguments():
             print()
             sys.exit(130)  # Ctrl+C
 
-    if args.password is None:
+    if args.session_id is None and args.password is None:
         parser.error(
             "Password required, either interactively or in ~/.netrc:\n"
             " * In a .netrc file: machine li.example.com login Charlie password SuperSecr3t! account Local"
@@ -198,6 +218,11 @@ def main():
 
         auth = Credentials(args.username, args.password, args.provider, reuse_session=session)
         ui = Connection(args.hostname, port=args.port, verify=args.verify, auth=auth, existing_session=session)
+
+        if args.session_id:
+            logger.info("Applying existing session cookie")
+            auth.sessionId = requests.cookies.RequestsCookieJar()
+            auth.sessionId.set("JSESSIONID", args.session_id, domain=args.hostname, path="/")
 
         try:
             ui.ping()  # Make a GET / request to the server.
